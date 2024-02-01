@@ -143,7 +143,7 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
         # Stop the robot. Tracking variables should remain unchanged.
         while True:
             self.node.get_logger().info("Requesting robot to stop...")
-            if self.api.stop(self.name):
+            if self.api.stop():
                 break
             self.sleep_for(0.1)
         if self._follow_path_thread is not None:
@@ -196,8 +196,12 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
                     # IMPLEMENT YOUR CODE HERE #
                     # Ensure x, y, theta are in units that api.navigate() #
                     # ------------------------ #
-                    response = self.api.navigate(self.name,
-                                                 [x, y, theta],
+                    print(f"Requesting robot to navigate to "
+                        f"[{self.path_index}][{x:.0f},{y:.0f},{theta:.0f}] "
+                        f"grid coordinates and [{target_pose[0]:.2f}. {target_pose[1]:.2f}, "
+                        f"{target_pose[2]:.2f}] RMF coordinates...")
+                    
+                    response = self.api.navigate([x, y, theta],
                                                  self.map_name)
 
                     if response:
@@ -218,19 +222,17 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
                             waypoint_wait_time = self.target_waypoint.time
                             if (waypoint_wait_time < time_now):
                                 self.state = RobotState.IDLE
-                            else:
-                                if self.path_index is not None:
-                                    self.node.get_logger().info(
-                                        f"Waiting for "
-                                        f"{(waypoint_wait_time - time_now).seconds}s")
-                                    self.next_arrival_estimator(
-                                        self.path_index, timedelta(seconds=0.0))
+                            elif self.path_index is not None:
+                                # self.node.get_logger().info(f"Waiting for {(waypoint_wait_time - time_now).seconds}s")
+                                self.next_arrival_estimator(self.path_index, timedelta(seconds=0.0))
+
 
                 elif self.state == RobotState.MOVING:
                     self.sleep_for(0.1)
+                    self.node.get_logger().info("Moving...")
                     # Check if we have reached the target
                     with self._lock:
-                        if (self.api.navigation_completed(self.name)):
+                        if (self.api.navigation_completed()):
                             self.node.get_logger().info(
                                 f"Robot [{self.name}] has reached its target "
                                 f"waypoint")
@@ -268,10 +270,17 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
                         # remaining travel duration, replace the API call
                         # below with an estimation
                         # ------------------------ #
-                        duration = self.api.navigation_remaining_duration(self.name)
+                        # duration = self.api.navigation_remaining_duration(self.name)
+                        # if self.path_index is not None:
+                        #     self.next_arrival_estimator(
+                        #         self.path_index, timedelta(seconds=duration))
                         if self.path_index is not None:
-                            self.next_arrival_estimator(
-                                self.path_index, timedelta(seconds=duration))
+                            dist_to_target = self.dist(self.position, target_pose)
+                            ori_delta = abs(abs(self.position[2]) - abs(target_pose[2]))
+                            ori_delta = (ori_delta + math.pi) % (2*math.pi) - math.pi  #convert to within range -pi, pi
+                            duration = dist_to_target/self.vehicle_traits.linear.nominal_velocity +\
+                                ori_delta/self.vehicle_traits.rotational.nominal_velocity
+                            self.next_arrival_estimator(self.path_index, timedelta(seconds=duration))
             self.path_finished_callback()
             self.node.get_logger().info(
                 f"Robot {self.name} has successfully navigated along "
@@ -307,20 +316,22 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
         self.dock_waypoint_index = dock_waypoint.index
 
         def _dock():
-            # Request the robot to start the relevant process
-            self.node.get_logger().info(
-                f"Requesting robot {self.name} to dock at {self.dock_name}")
-            self.api.start_process(self.name, self.dock_name, self.map_name)
+            while True:
+                # Request the robot to start the relevant process
+                self.node.get_logger().info(
+                    f"Requesting robot {self.name} to dock at {self.dock_name}")
+                if self.api.navigate_to_waypoint(self.dock_name, self.map_name):
+                    break
 
-            with self._lock:
-                self.on_waypoint = None
-                self.on_lane = None
-            self.sleep_for(0.1)
-            # ------------------------ #
-            # IMPLEMENT YOUR CODE HERE #
-            # With whatever logic you need for docking #
-            # ------------------------ #
-            while (not self.api.docking_completed(self.name)):
+                with self._lock:
+                    self.on_waypoint = None
+                    self.on_lane = None
+                self.sleep_for(0.1)
+                # ------------------------ #
+                # IMPLEMENT YOUR CODE HERE #
+                # With whatever logic you need for docking #
+                # ------------------------ #
+            while (not self.api.task_completed()):
                 # Check if we need to abort
                 if self._quit_dock_event.is_set():
                     self.node.get_logger().info("Aborting docking")
@@ -340,7 +351,7 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
     def get_position(self):
         ''' This helper function returns the live position of the robot in the
         RMF coordinate frame'''
-        position = self.api.position(self.name)
+        position = self.api.position()
         if position is not None:
             x, y = self.transforms['robot_to_rmf'].transform(
                 [position[0], position[1]])
@@ -363,7 +374,7 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
             return self.position
 
     def get_battery_soc(self):
-        battery_soc = self.api.battery_soc(self.name)
+        battery_soc = self.api.battery_soc()
         if battery_soc is not None:
             return battery_soc
         else:
@@ -424,7 +435,10 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
             else:  # if robot is lost
                 self.update_handle.update_lost_position(
                     self.map_name, self.position)
-
+    ########################################################################
+    ## Utils
+    ########################################################################
+                
     def get_current_lane(self):
         def projection(current_position,
                        target_position,
