@@ -36,13 +36,14 @@ from functools import partial
 
 from .RobotCommandHandle import RobotCommandHandle
 from .RobotClientAPI import RobotAPI
+from .utils import RmfMapTransform
 
 # ------------------------------------------------------------------------------
 # Helper functions
 # ------------------------------------------------------------------------------
 
 
-def initialize_fleet(config_yaml, nav_graph_path, node, use_sim_time, server_uri):
+def initialize_fleet(config_yaml, nav_graph_path, node, use_sim_time, server_uri, args):
     # Profile and traits
     fleet_config = config_yaml['rmf_fleet']
     profile = traits.Profile(geometry.make_final_convex_circle(
@@ -137,36 +138,43 @@ def initialize_fleet(config_yaml, nav_graph_path, node, use_sim_time, server_uri
     fleet_handle.accept_task_requests(
         partial(_task_request_check, task_capabilities))
 
-    # Transforms
-    rmf_coordinates = config_yaml['reference_coordinates']['rmf']
-    robot_coordinates = config_yaml['reference_coordinates']['robot']
-    transforms = {
-        'rmf_to_robot': nudged.estimate(rmf_coordinates, robot_coordinates),
-        'robot_to_rmf': nudged.estimate(robot_coordinates, rmf_coordinates)}
-    transforms['orientation_offset'] = \
-        transforms['rmf_to_robot'].get_rotation()
-    mse = nudged.estimate_error(transforms['rmf_to_robot'],
-                                rmf_coordinates,
-                                robot_coordinates)
-    print(f"Coordinate transformation error: {mse}")
-    print("RMF to Robot transform:")
-    print(f"    rotation:{transforms['rmf_to_robot'].get_rotation()}")
-    print(f"    scale:{transforms['rmf_to_robot'].get_scale()}")
-    print(f"    trans:{transforms['rmf_to_robot'].get_translation()}")
-    print("Robot to RMF transform:")
-    print(f"    rotation:{transforms['robot_to_rmf'].get_rotation()}")
-    print(f"    scale:{transforms['robot_to_rmf'].get_scale()}")
-    print(f"    trans:{transforms['robot_to_rmf'].get_translation()}")
+    # Transforms - use robot map transforms instead
+    # rmf_coordinates = config_yaml['reference_coordinates']['rmf']
+    # robot_coordinates = config_yaml['reference_coordinates']['robot']
+    # transforms = {
+    #     'rmf_to_robot': nudged.estimate(rmf_coordinates, robot_coordinates),
+    #     'robot_to_rmf': nudged.estimate(robot_coordinates, rmf_coordinates)}
+    # transforms['orientation_offset'] = \
+    #     transforms['rmf_to_robot'].get_rotation()
+    # mse = nudged.estimate_error(transforms['rmf_to_robot'],
+    #                             rmf_coordinates,
+    #                             robot_coordinates)
+    # print(f"Coordinate transformation error: {mse}")
+    # print("RMF to Robot transform:")
+    # print(f"    rotation:{transforms['rmf_to_robot'].get_rotation()}")
+    # print(f"    scale:{transforms['rmf_to_robot'].get_scale()}")
+    # print(f"    trans:{transforms['rmf_to_robot'].get_translation()}")
+    # print("Robot to RMF transform:")
+    # print(f"    rotation:{transforms['robot_to_rmf'].get_rotation()}")
+    # print(f"    scale:{transforms['robot_to_rmf'].get_scale()}")
+    # print(f"    trans:{transforms['robot_to_rmf'].get_translation()}")
 
     def _updater_inserter(cmd_handle, update_handle):
         """Insert a RobotUpdateHandle."""
         cmd_handle.update_handle = update_handle
+    
+    # Switch between using Robot's API or Testing API
+    if args.test_api_config_file != "":
+        from .TestClientAPI import ClientAPI
+        node.get_logger().warn(
+            f"Testing fleet adapter with test api: {args.test_api_config_file}")
+        api = ClientAPI(args.test_api_config_file)
+    else:
+        api = RobotAPI(
+            fleet_config['fleet_manager']['prefix'],
+            fleet_config['fleet_manager']['user'],
+            fleet_config['fleet_manager']['password'])
 
-    # Initialize robot API for this fleet
-    api = RobotAPI(
-        fleet_config['fleet_manager']['prefix'],
-        fleet_config['fleet_manager']['user'],
-        fleet_config['fleet_manager']['password'])
 
     # Initialize robots for this fleet
 
@@ -178,87 +186,168 @@ def initialize_fleet(config_yaml, nav_graph_path, node, use_sim_time, server_uri
             time.sleep(0.2)
             for robot_name in list(missing_robots.keys()):
                 node.get_logger().debug(f"Connecting to robot: {robot_name}")
-                position = api.position(robot_name)
-                if position is None:
+                robot_config = missing_robots[robot_name]['robot_config']
+                # position = api.position()
+                # if position is None:
+                #     continue
+                # if len(position) > 2:
+                #     node.get_logger().info(f"Initializing robot: {robot_name}")
+                #     robots_config = config_yaml['robots'][robot_name]
+                #     rmf_config = robots_config['rmf_config']
+                #     robot_config = robots_config['robot_config']
+                #     initial_waypoint = rmf_config['start']['waypoint']
+                #     initial_orientation = rmf_config['start']['orientation']
+
+                #     starts = []
+                #     time_now = adapter.now()
+
+                #     if (initial_waypoint is not None) and\
+                #             (initial_orientation is not None):
+                #         node.get_logger().info(
+                #             f"Using provided initial waypoint "
+                #             "[{initial_waypoint}] "
+                #             f"and orientation [{initial_orientation:.2f}] to "
+                #             f"initialize starts for robot [{robot_name}]")
+                #         # Get the waypoint index for initial_waypoint
+                #         initial_waypoint_index = nav_graph.find_waypoint(
+                #             initial_waypoint).index
+                #         starts = [plan.Start(time_now,
+                #                              initial_waypoint_index,
+                #                              initial_orientation)]
+                #     else:
+                #         node.get_logger().info(
+                #             f"Running compute_plan_starts for robot: "
+                #             "{robot_name}")
+                #         starts = plan.compute_plan_starts(
+                #             nav_graph,
+                #             rmf_config['start']['map_name'],
+                #             position,
+                #             time_now)
+
+                #     if starts is None or len(starts) == 0:
+                #         node.get_logger().error(
+                #             f"Unable to determine StartSet for {robot_name}")
+                #         continue
+                if not api.online():
+                    node.get_logger().error(f"Robot [{robot_name}] is offline")
                     continue
-                if len(position) > 2:
-                    node.get_logger().info(f"Initializing robot: {robot_name}")
-                    robots_config = config_yaml['robots'][robot_name]
-                    rmf_config = robots_config['rmf_config']
-                    robot_config = robots_config['robot_config']
-                    initial_waypoint = rmf_config['start']['waypoint']
-                    initial_orientation = rmf_config['start']['orientation']
 
-                    starts = []
-                    time_now = adapter.now()
+                robot_map_name = api.current_map()
+                print("robot_map_name", robot_map_name)
+                if robot_map_name is None:
+                    node.get_logger().warn(f"Failed to get robot map name: [{robot_map_name}]")
+                    continue
 
-                    if (initial_waypoint is not None) and\
-                            (initial_orientation is not None):
-                        node.get_logger().info(
-                            f"Using provided initial waypoint "
-                            "[{initial_waypoint}] "
-                            f"and orientation [{initial_orientation:.2f}] to "
-                            f"initialize starts for robot [{robot_name}]")
-                        # Get the waypoint index for initial_waypoint
-                        initial_waypoint_index = nav_graph.find_waypoint(
-                            initial_waypoint).index
-                        starts = [plan.Start(time_now,
-                                             initial_waypoint_index,
-                                             initial_orientation)]
+                # get robot coordinates and transform to rmf_coor
+                robot_pos = api.position()
+                if robot_pos is None:
+                    node.get_logger().warn(f"Failed to get [{robot_name}] position")
+                    continue
+
+                node.get_logger().info(f"Initializing robot: {robot_name}")
+
+                # use defined transfrom param if avail, else use ref coors
+                # note that the robot's map_name should be identical to the one in config
+                robot_map_transforms = {}
+                robot_map_tf = config_yaml["rmf_transform"]
+                for map_name, tf in robot_map_tf.items():
+                    print(f"Loading Map transform for robot map: {map_name} ")
+                    rmf_transform = RmfMapTransform()
+                    if "reference_coordinates" in tf:
+                        rmf_coords = tf['reference_coordinates']['rmf']
+                        robot_coords = tf['reference_coordinates']['robot']
+                        mse = rmf_transform.estimate(robot_coords, rmf_coords)
+                        print(f"Coordinate transformation error: {mse}")
+                    elif "transform" in tf:
+                        tx, ty, r, s = tf["transform"]
+                        rmf_transform = RmfMapTransform(tx, ty, r, s)
                     else:
-                        node.get_logger().info(
-                            f"Running compute_plan_starts for robot: "
-                            "{robot_name}")
-                        starts = plan.compute_plan_starts(
-                            nav_graph,
-                            rmf_config['start']['map_name'],
-                            position,
-                            time_now)
+                        assert False, f"no transform provided for map {map_name}"
+                    robot_map_transforms[map_name] = {
+                        "rmf_map_name": tf["rmf_map_name"],
+                        "tf": rmf_transform
+                    }
 
-                    if starts is None or len(starts) == 0:
-                        node.get_logger().error(
-                            f"Unable to determine StartSet for {robot_name}")
-                        continue
+                    print(f"Coordinate Transform from [{map_name}] to [{tf['rmf_map_name']}]")
+                    tx, ty, r, s = rmf_transform.to_robot_map_transform()
+                    print(f"RMF to Ecobot transform :: trans [{tx}, {ty}]; rot {r}; scale {s}")
+                    tx, ty, r, s = rmf_transform.to_rmf_map_transform()
+                    print(f"Ecobot to RMF transform :: trans [{tx}, {ty}]; rot {r}; scale {s}")
 
-                    robot = RobotCommandHandle(
-                        name=robot_name,
-                        fleet_name=fleet_name,
-                        config=robot_config,
-                        node=node,
-                        graph=nav_graph,
-                        vehicle_traits=vehicle_traits,
-                        transforms=transforms,
-                        map_name=rmf_config['start']['map_name'],
-                        start=starts[0],
-                        position=position,
-                        charger_waypoint=rmf_config['charger']['waypoint'],
-                        update_frequency=rmf_config.get(
-                            'robot_state_update_frequency', 1),
-                        adapter=adapter,
-                        api=api)
+                rmf_config = missing_robots[robot_name]['rmf_config']
+                print(robot_map_transforms)
+                assert robot_map_name in robot_map_transforms, "robot map isnt recognized"
 
-                    if robot.initialized:
-                        robots[robot_name] = robot
-                        # Add robot to fleet
-                        fleet_handle.add_robot(robot,
-                                               robot_name,
-                                               profile,
-                                               [starts[0]],
-                                               partial(_updater_inserter,
-                                                       robot))
-                        node.get_logger().info(
-                            f"Successfully added new robot: {robot_name}")
+                current_map = robot_map_transforms[robot_map_name]["rmf_map_name"]
+                starts = []
+                time_now = adapter.now()
 
-                    else:
-                        node.get_logger().error(
-                            f"Failed to initialize robot: {robot_name}")
+                x,y,_ = robot_map_transforms[robot_map_name]["tf"].to_rmf_map(
+                    [robot_pos[0],robot_pos[1], 0])
+                position = [x, y, 0]
 
-                    del missing_robots[robot_name]
+                # Identify the current location of the robot in rmf's graph
+                node.get_logger().info(
+                    f"Running compute_plan_starts for robot: "
+                    f"{robot_name}, with pos: {position}")
+                starts = plan.compute_plan_starts(
+                    nav_graph,
+                    current_map,
+                    position,
+                    time_now,
+                    max_merge_waypoint_distance = 1.0,
+                    max_merge_lane_distance = rmf_config["max_merge_lane_distance"])
+                print("nav_graph", nav_graph)
+                print("current_map", current_map)
+                print("position", position)
+                print("time_now", time_now)
+                print("max_merge_lane_distance", rmf_config["max_merge_lane_distance"])
+                print(starts)
+                if starts is None or len(starts) == 0:
+                    node.get_logger().error(
+                        f"Unable to determine StartSet for {robot_name} "
+                        f"with map {current_map}")
+                    continue
+
+                robot = RobotCommandHandle(
+                    name=robot_name,
+                    fleet_name=fleet_name,
+                    config=robot_config,
+                    node=node,
+                    graph=nav_graph,
+                    vehicle_traits=vehicle_traits,
+                    transforms=robot_map_transforms,
+                    map_name=robot_map_name,
+                    start=starts[0],
+                    position=position,
+                    charger_waypoint=rmf_config['charger']['waypoint'],
+                    update_frequency=rmf_config.get(
+                        'robot_state_update_frequency', 1),
+                    adapter=adapter,
+                    api=api)
+
+                if robot.initialized:
+                    robots[robot_name] = robot
+                    # Add robot to fleet
+                    fleet_handle.add_robot(robot,
+                                            robot_name,
+                                            profile,
+                                            [starts[0]],
+                                            partial(_updater_inserter,
+                                                    robot))
+                    node.get_logger().info(
+                        f"Successfully added new robot: {robot_name}")
 
                 else:
-                    pass
-                    node.get_logger().debug(
-                        f"{robot_name} not found, trying again...")
+                    node.get_logger().error(
+                        f"Failed to initialize robot: {robot_name}")
+
+                del missing_robots[robot_name]
+
+            # else:
+            #     pass
+            #     node.get_logger().debug(
+            #         f"{robot_name} not found, trying again...")
         return
 
     add_robots = threading.Thread(target=_add_fleet_robots, args=())
@@ -286,6 +375,8 @@ def main(argv=sys.argv):
                     help="URI of the api server to transmit state and task information.")
     parser.add_argument("--use_sim_time", action="store_true",
                         help='Use sim time, default: false')
+    parser.add_argument("-tf", "--test_api_config_file", type=str, required=False, default="",
+        help='supply a test_client_api config file to test colab client api as sim')
     args = parser.parse_args(args_without_ros[1:])
     print(f"Starting fleet adapter...")
 
@@ -315,7 +406,8 @@ def main(argv=sys.argv):
         nav_graph_path,
         node,
         args.use_sim_time,
-        server_uri)
+        server_uri,
+        args)
 
     # Create executor for the command handle node
     rclpy_executor = rclpy.executors.SingleThreadedExecutor()

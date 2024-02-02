@@ -146,12 +146,12 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
             if self.api.stop():
                 break
             self.sleep_for(0.1)
-        if self._follow_path_thread is not None:
-            self._quit_path_event.set()
-            if self._follow_path_thread.is_alive():
-                self._follow_path_thread.join()
-            self._follow_path_thread = None
-            self.clear()
+        # if self._follow_path_thread is not None:
+        #     self._quit_path_event.set()
+        #     if self._follow_path_thread.is_alive():
+        #         self._follow_path_thread.join()
+        #     self._follow_path_thread = None
+        #     self.clear()
 
     def follow_new_path(
         self,
@@ -159,7 +159,12 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
         next_arrival_estimator,
         path_finished_callback):
 
-        self.stop()
+        if self._follow_path_thread is not None:
+            self._quit_path_event.set()
+            if self._follow_path_thread.is_alive():
+                self._follow_path_thread.join()
+            self._follow_path_thread = None
+            self.clear()
         self._quit_path_event.clear()
 
         self.node.get_logger().info("Received new path to follow...")
@@ -183,15 +188,18 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
                     return
                 # State machine
                 if self.state == RobotState.IDLE:
+                    print("State: Idle...")
                     # Assign the next waypoint
                     self.target_waypoint = self.remaining_waypoints[0][1]
                     self.path_index = self.remaining_waypoints[0][0]
                     # Move robot to next waypoint
                     target_pose = self.target_waypoint.position
-                    [x, y] = self.transforms["rmf_to_robot"].transform(
-                        target_pose[:2])
-                    theta = target_pose[2] + \
-                        self.transforms['orientation_offset']
+                    # [x, y] = self.transforms["rmf_to_robot"].transform(
+                    #     target_pose[:2])
+                    # theta = target_pose[2] + \
+                    #     self.transforms['orientation_offset']
+                    [x,y, yaw] = self.transforms[self.robot_map_name]["tf"].to_robot_map(target_pose[:3])
+                    theta = math.degrees(yaw)
                     # ------------------------ #
                     # IMPLEMENT YOUR CODE HERE #
                     # Ensure x, y, theta are in units that api.navigate() #
@@ -202,7 +210,7 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
                         f"{target_pose[2]:.2f}] RMF coordinates...")
                     
                     response = self.api.navigate([x, y, theta],
-                                                 self.map_name)
+                                                 self.robot_map_name)
 
                     if response:
                         self.remaining_waypoints = self.remaining_waypoints[1:]
@@ -352,26 +360,51 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
         ''' This helper function returns the live position of the robot in the
         RMF coordinate frame'''
         position = self.api.position()
-        if position is not None:
-            x, y = self.transforms['robot_to_rmf'].transform(
-                [position[0], position[1]])
-            theta = math.radians(position[2]) - \
-                self.transforms['orientation_offset']
-            # ------------------------ #
-            # IMPLEMENT YOUR CODE HERE #
-            # Ensure x, y are in meters and theta in radians #
-            # ------------------------ #
-            # Wrap theta between [-pi, pi]. Else arrival estimate will
-            # assume robot has to do full rotations and delay the schedule
-            if theta > np.pi:
-                theta = theta - (2 * np.pi)
-            if theta < -np.pi:
-                theta = (2 * np.pi) + theta
-            return [x, y, theta]
-        else:
+        #the current map name from api is passed through instantiation of command handler
+        map_name = self.map_name
+        # if position is not None:
+        #     x, y = self.transforms['robot_to_rmf'].transform(
+        #         [position[0], position[1]])
+        #     theta = math.radians(position[2]) - \
+        #         self.transforms['orientation_offset']
+        #     # ------------------------ #
+        #     # IMPLEMENT YOUR CODE HERE #
+        #     # Ensure x, y are in meters and theta in radians #
+        #     # ------------------------ #
+        #     # Wrap theta between [-pi, pi]. Else arrival estimate will
+        #     # assume robot has to do full rotations and delay the schedule
+        #     if theta > np.pi:
+        #         theta = theta - (2 * np.pi)
+        #     if theta < -np.pi:
+        #         theta = (2 * np.pi) + theta
+        #     return [x, y, theta]
+        # else:
+        #     self.node.get_logger().error(
+        #         "Unable to retrieve position from robot.")
+        #     return self.position
+
+        if position is None or map_name is None:
             self.node.get_logger().error(
-                "Unable to retrieve position from robot.")
+                "Unable to retrieve position from robot. Returning last known position...")
+            # self.is_online = False
             return self.position
+
+        if map_name not in self.transforms:
+            self.node.get_logger().error(
+                f"Robot map name [{map_name}] is not known. return last known position.")
+            # self.is_online = True
+            # self.in_error = True
+            return self.position
+        
+        # self.in_error = False
+        tf = self.transforms[map_name]
+        x,y,theta = tf['tf'].to_rmf_map([position[0],position[1], math.radians(position[2])])
+        print(f"Convert pos from {position} grid coor to {x},{y}, {theta} rmf coor")
+        # self.is_online = True
+        # will update the member function directly
+        self.robot_map_name = map_name
+        self.rmf_map_name = tf['rmf_map_name']
+        return [x,y,theta]
 
     def get_battery_soc(self):
         battery_soc = self.api.battery_soc()

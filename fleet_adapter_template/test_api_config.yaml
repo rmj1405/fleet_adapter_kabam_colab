@@ -1,0 +1,19 @@
+# note that yaw (x, y, yaw) from gaussian api is in degree, not radian
+# mock_dock_path is empty since dock_name/dock() is not used in this scenario
+
+# start pt is closer to waypoint_3
+mock_clean_path: [
+    [90.49,  326.88, -26.685429442], 
+    [103.57, 320.33, -26.685429442],
+    [147.44, 297.98, -26.685429442],
+    [203.90, 273.71, -26.685429442]
+
+]
+mock_dock_path: []
+dock_position: [259, 231, 66.165956889106099] # charging point
+mock_location: [259, 231, 66.165956889106099] # this indicate where the robot will start
+# dock_position: [261, 235, 63.314570558132402] # charging point
+# mock_location: [261, 235, 63.314570558132402] 
+mock_robot_map_name: "CW_Lvl4"
+
+#actual ecobot robot position (x, y, yaw): 259, 231, 0
