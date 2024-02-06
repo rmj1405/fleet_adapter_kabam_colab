@@ -198,7 +198,7 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
                     #     target_pose[:2])
                     # theta = target_pose[2] + \
                     #     self.transforms['orientation_offset']
-                    [x,y, yaw] = self.transforms[self.robot_map_name]["tf"].to_robot_map(target_pose[:3])
+                    [x,y, yaw] = self.transforms[self.map_name]["tf"].to_robot_map(target_pose[:3])
                     theta = math.degrees(yaw)
                     # ------------------------ #
                     # IMPLEMENT YOUR CODE HERE #
@@ -210,7 +210,7 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
                         f"{target_pose[2]:.2f}] RMF coordinates...")
                     
                     response = self.api.navigate([x, y, theta],
-                                                 self.robot_map_name)
+                                                 self.map_name)
 
                     if response:
                         self.remaining_waypoints = self.remaining_waypoints[1:]
@@ -402,7 +402,7 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
         print(f"Convert pos from {position} grid coor to {x},{y}, {theta} rmf coor")
         # self.is_online = True
         # will update the member function directly
-        self.robot_map_name = map_name
+        self.map_name = map_name
         self.rmf_map_name = tf['rmf_map_name']
         return [x,y,theta]
 

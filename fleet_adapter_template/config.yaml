@@ -55,7 +55,7 @@ robots:
       #   waypoint: null
       #   orientation: null
       charger:
-        waypoint: "dock"
+        waypoint: "colab_dock"
   # Configuration for the second robot in this fleet if there is a second robot
   # Uncomment if more than one robot exists.
   # deliverybot2:
