@@ -50,11 +50,11 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
                  transforms,
                  map_name,
                  start,
-                 position,
                  charger_waypoint,
                  update_frequency,
                  adapter,
-                 api):
+                 api,
+                 max_merge_lane_distance):
         adpt.RobotCommandHandle.__init__(self)
         self.name = name
         self.fleet_name = fleet_name
@@ -63,22 +63,24 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
         self.graph = graph
         self.vehicle_traits = vehicle_traits
         self.transforms = transforms
-        self.map_name = map_name
+        self.robot_map_name = map_name
         # Get the index of the charger waypoint
         waypoint = self.graph.find_waypoint(charger_waypoint)
         assert waypoint, f"Charger waypoint {charger_waypoint} \
           does not exist in the navigation graph"
-        self.charger_waypoint_index = waypoint.index
+        self.charger_waypoint = waypoint.index
         self.charger_is_set = False
         self.update_frequency = update_frequency
         self.update_handle = None  # RobotUpdateHandle
         self.battery_soc = 1.0
         self.api = api
-        self.position = position  # (x,y,theta) in RMF coordinates (meters, radians)
+        # initialise position below
+        # self.position = position  # (x,y,theta) in RMF coordinates (meters, radians)
         self.initialized = False
         self.state = RobotState.IDLE
         self.dock_name = ""
         self.adapter = adapter
+        self.max_merge_lane_distance = max_merge_lane_distance
 
         self.requested_waypoints = []  # RMF Plan waypoints
         self.remaining_waypoints = []
@@ -105,9 +107,23 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
         self._dock_thread = None
         self._quit_dock_event = threading.Event()
 
+        #Added in from EcobotCommandHandle
+        self.action_execution = None
+        self.stubbornness = None
+        self.in_error = False
+        self.is_online = False
+        self.action_category = None
+
+        # Get the latest position (x,y,theta) in RMF coordinates (meters, radians)
+        robot_pos = self.get_robot_position()
+        while robot_pos is None:
+            print("Not able to retrieve latest position, trying again...")
+            time.sleep(2.0)
+            robot_pos = self.get_robot_position()
+
+        self.position = robot_pos
         self.node.get_logger().info(
-            f"The robot is starting at: [{self.position[0]:.2f}, "
-            f"{self.position[1]:.2f}, {self.position[2]:.2f}]")
+            f"The robot is starting at: [{self.position_str()}]")
 
         # Update tracking variables
         if start.lane is not None:  # If the robot is on a lane
@@ -118,11 +134,42 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
             self.last_known_waypoint_index = start.waypoint
             self.on_waypoint = start.waypoint
 
-        self.state_update_timer = self.node.create_timer(
+        # Moved to init_handler method
+        # self.state_update_timer = self.node.create_timer(
+        #     1.0 / self.update_frequency,
+        #     self.update)
+
+        # Unused variable(I think)
+        self.initialized = True
+        
+    ##############################################################################
+    # Init RobotUpdateHandle class member
+    def init_handler(self, handle):
+        self.update_handle = handle
+        if ("max_delay" in self.config.keys()):
+            max_delay = self.config["max_delay"]
+            print(f"Setting max delay to {max_delay}s")
+            self.update_handle.set_maximum_delay(max_delay)
+        if self.charger_waypoint is not None:
+            self.update_handle.set_charger_waypoint(self.charger_waypoint)
+        else:
+            self.node.get_logger().error(
+                f"Charger waypoint {self.charger_waypoint} does not exist in the nav graph."
+                " Using default nearest charger in the map")
+        self.update_handle.set_action_executor(self._action_executor)
+        self.participant = self.update_handle.get_unstable_participant()
+
+        self.location_update_timer = self.node.create_timer(
             1.0 / self.update_frequency,
             self.update)
 
-        self.initialized = True
+        # Note: only update robot status 4.5 times the update period, prevent overload
+        self.status_update_timer = self.node.create_timer(
+            4.5 / self.update_frequency,
+            self.update_robot_status)
+
+        self.node.get_logger().info(
+            f"Start State Update with freq: {self.update_frequency}")
 
     def sleep_for(self, seconds):
         goal_time =\
@@ -145,7 +192,7 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
             self.node.get_logger().info("Requesting robot to stop...")
             if self.api.stop():
                 break
-            self.sleep_for(0.1)
+            time.sleep(0.1)
         # if self._follow_path_thread is not None:
         #     self._quit_path_event.set()
         #     if self._follow_path_thread.is_alive():
@@ -198,7 +245,7 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
                     #     target_pose[:2])
                     # theta = target_pose[2] + \
                     #     self.transforms['orientation_offset']
-                    [x,y, yaw] = self.transforms[self.map_name]["tf"].to_robot_map(target_pose[:3])
+                    [x,y, yaw] = self.transforms[self.robot_map_name]["tf"].to_robot_map(target_pose[:3])
                     theta = math.degrees(yaw)
                     # ------------------------ #
                     # IMPLEMENT YOUR CODE HERE #
@@ -210,7 +257,7 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
                         f"{target_pose[2]:.2f}] RMF coordinates...")
                     
                     response = self.api.navigate([x, y, theta],
-                                                 self.map_name)
+                                                 self.robot_map_name)
 
                     if response:
                         self.remaining_waypoints = self.remaining_waypoints[1:]
@@ -328,7 +375,7 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
                 # Request the robot to start the relevant process
                 self.node.get_logger().info(
                     f"Requesting robot {self.name} to dock at {self.dock_name}")
-                if self.api.navigate_to_waypoint(self.dock_name, self.map_name):
+                if self.api.navigate_to_waypoint(self.dock_name, self.robot_map_name):
                     break
 
                 with self._lock:
@@ -356,12 +403,13 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
         self._dock_thread = threading.Thread(target=_dock)
         self._dock_thread.start()
 
-    def get_position(self):
+    def get_robot_position(self):
         ''' This helper function returns the live position of the robot in the
         RMF coordinate frame'''
         position = self.api.position()
         #the current map name from api is passed through instantiation of command handler
-        map_name = self.map_name
+        map_name = self.api.current_map()
+
         # if position is not None:
         #     x, y = self.transforms['robot_to_rmf'].transform(
         #         [position[0], position[1]])
@@ -386,60 +434,181 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
         if position is None or map_name is None:
             self.node.get_logger().error(
                 "Unable to retrieve position from robot. Returning last known position...")
-            # self.is_online = False
+            self.is_online = False
             return self.position
 
         if map_name not in self.transforms:
             self.node.get_logger().error(
                 f"Robot map name [{map_name}] is not known. return last known position.")
-            # self.is_online = True
-            # self.in_error = True
+            self.is_online = True
+            self.in_error = True
             return self.position
         
         # self.in_error = False
         tf = self.transforms[map_name]
         x,y,theta = tf['tf'].to_rmf_map([position[0],position[1], math.radians(position[2])])
         print(f"Convert pos from {position} grid coor to {x},{y}, {theta} rmf coor")
-        # self.is_online = True
+        self.is_online = True
         # will update the member function directly
-        self.map_name = map_name
+        self.robot_map_name = map_name
         self.rmf_map_name = tf['rmf_map_name']
         return [x,y,theta]
-
+    
+    ##############################################################################
     def get_battery_soc(self):
         battery_soc = self.api.battery_soc()
         if battery_soc is not None:
+            self.is_online = True
             return battery_soc
         else:
+            self.is_online = True
             self.node.get_logger().error(
                 "Unable to retrieve battery data from robot.")
             return self.battery_soc
+        
+    ##############################################################################
+    # call this when starting custom execution
+    def _action_executor(self, 
+                        category: str,
+                        description: dict,
+                        execution:
+                        adpt.robot_update_handle.ActionExecution):
+        with self._lock:
+            # only accept clean and manual_control
+            # assert(category in ["clean", "manual_control"])
 
+            self.action_category = category
+            if (category == "clean"):
+                attempts = 0
+                if 'clean_mode' in description:
+                    clean_mode = description['clean_mode']
+                else:
+                    clean_mode = self.config['active_cleaning_config']
+                self.api.set_cleaning_mode(clean_mode)
+                # Will try to make max 3 attempts to start the clean task
+                while True:
+                    self.node.get_logger().info(
+                        f"Requesting robot {self.name} to clean {description}")
+                    if self.api.start_task(description["clean_task_name"], self.robot_map_name):
+                        self.check_task_completion = self.api.task_completed # check api func
+                        break
+                    if (attempts > 3):
+                        self.node.get_logger().error(
+                            f"Failed to initiate cleaning action for robot [{self.name}]")
+                        # TODO: kill_task() or fail the task (api is not avail in adapter)
+                        execution.error("Failed to initiate cleaning action for robot {self.name}")
+                        execution.finished()
+                        return
+                    attempts+=1
+                    time.sleep(1.0)
+            elif (category == "manual_control"):
+                self.check_task_completion = lambda:False  # user can only cancel the manual_control
+            elif (category == "print"):
+                position = self.get_robot_position()
+                print(f"Robot {self.name} is at position {position}")
+                self.check_task_completion = self.api.task_completed
+                execution.finished()
+            # start Perform Action
+            self.node.get_logger().warn(f"Robot [{self.name}] starts [{category}] action")
+            self.start_action_time = self.adapter.now()
+            self.on_waypoint = None
+            self.on_lane = None
+            self.action_execution = execution
+            self.stubbornness = self.update_handle.unstable_be_stubborn()
+            # robot moves slower during perform action
+            self.vehicle_traits.linear.nominal_velocity *= 0.2
+
+    ##############################################################################
+    # This function will be called periodically to check if the action if completed
+    def check_perform_action(self):
+        print(f"Executing perform action [{self.action_category}]")
+        # check if action is completed/killed/canceled
+        action_ok = self.action_execution.okay()
+        if self.check_task_completion() or not action_ok:
+            if action_ok:
+                self.node.get_logger().info(
+                    f"action [{self.action_category}] is completed")
+                self.action_execution.finished()
+            else:
+                self.node.get_logger().warn(
+                    f"action [{self.action_category}] is killed/canceled")
+            self.stubbornness.release()
+            self.stubbornness = None
+            self.action_execution = None
+            self.start_action_time = None
+            self.vehicle_traits.linear.nominal_velocity *= 5 # change back vel
+            return
+
+        # still executing perform action
+        # assert(self.participant)
+        assert(self.start_action_time)
+        total_action_time = timedelta(hours=1.0)  #TODO: populate actual total time
+        remaining_time = total_action_time - (self.adapter.now() - self.start_action_time)
+        print(f"Still performing action, Estimated remaining time: [{remaining_time}]")
+        self.action_execution.update_remaining_time(remaining_time)
+
+        # Commented to see if it will prevent the robot from moving(might be ecobot specific)
+        # create a short segment of the trajectory according to robot current heading
+        _x, _y, _theta = self.position
+        mock_pos = [_x + math.cos(_theta)*2.5, _y + math.sin(_theta)*2.5, _theta]
+        positions = [self.position, mock_pos] 
+
+        starts = self.get_start_sets()
+        if starts is not None:
+            self.update_handle.update_position(starts)
+        else:
+            self.node.get_logger().error(f"Cant get startset during perform action")
+            self.update_handle.update_off_grid_position(
+                self.position, self.target_waypoint.graph_index)
+
+        trajectory = schedule.make_trajectory(
+            self.vehicle_traits,
+            self.adapter.now(),
+            positions)
+        route = schedule.Route(self.rmf_map_name, trajectory)
+        self.participant.set_itinerary([route])
+
+    ##############################################################################
+    # Get start sets, for update_position(startsets)
+    def get_start_sets(self):
+        return plan.compute_plan_starts(
+            self.graph,
+            self.rmf_map_name,
+            self.position,
+            self.adapter.now(),
+            max_merge_waypoint_distance = 0.5,
+            max_merge_lane_distance = self.max_merge_lane_distance)
+    
+    ##############################################################################
     def update(self):
-        self.position = self.get_position()
+        self.position = self.get_robot_position()
         self.battery_soc = self.get_battery_soc()
         if self.update_handle is not None:
             self.update_state()
 
     def update_state(self):
         self.update_handle.update_battery_soc(self.battery_soc)
-        if not self.charger_is_set:
-            if ("max_delay" in self.config.keys()):
-                max_delay = self.config["max_delay"]
-                self.node.get_logger().info(
-                    f"Setting max delay to {max_delay}s")
-                self.update_handle.set_maximum_delay(max_delay)
-            if (self.charger_waypoint_index < self.graph.num_waypoints):
-                self.update_handle.set_charger_waypoint(
-                    self.charger_waypoint_index)
-            else:
-                self.node.get_logger().warn(
-                    "Invalid waypoint supplied for charger. "
-                    "Using default nearest charger in the map")
-            self.charger_is_set = True
+        # if not self.charger_is_set:
+        #     if ("max_delay" in self.config.keys()):
+        #         max_delay = self.config["max_delay"]
+        #         self.node.get_logger().info(
+        #             f"Setting max delay to {max_delay}s")
+        #         self.update_handle.set_maximum_delay(max_delay)
+        #     if (self.charger_waypoint_index < self.graph.num_waypoints):
+        #         self.update_handle.set_charger_waypoint(
+        #             self.charger_waypoint_index)
+        #     else:
+        #         self.node.get_logger().warn(
+        #             "Invalid waypoint supplied for charger. "
+        #             "Using default nearest charger in the map")
+        #     self.charger_is_set = True
         # Update position
         with self._lock:
-            if (self.on_waypoint is not None):  # if robot is on a waypoint
+            if (self.action_execution):
+                self.check_perform_action()
+            elif (self.on_waypoint is not None):  # if robot is on a waypoint
+                print(f"[update] Calling update_current_waypoint() on waypoint with " \
+                        f"pose[{self.position_str()}] and waypoint[{self.on_waypoint}]")
                 self.update_handle.update_current_waypoint(
                     self.on_waypoint, self.position[2])
             elif (self.on_lane is not None):  # if robot is on a lane
@@ -455,6 +624,8 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
                 lane_indices = [self.on_lane]
                 if reverse_lane is not None:  # Unidirectional graph
                     lane_indices.append(reverse_lane.index)
+                print(f"[update] Calling update_current_lanes() with pose[{self.position_str()}] "\
+                    f"and lanes:{lane_indices}")
                 self.update_handle.update_current_lanes(
                     self.position, lane_indices)
             elif (self.dock_waypoint_index is not None):
@@ -463,15 +634,46 @@ class RobotCommandHandle(adpt.RobotCommandHandle):
             # if robot is merging into a waypoint
             elif (self.target_waypoint is not None and
                 self.target_waypoint.graph_index is not None):
+                print(f"[update] Calling update_off_grid_position() with pose " \
+                    f"[{self.position_str()}] and waypoint[{self.target_waypoint.graph_index}]")
                 self.update_handle.update_off_grid_position(
                     self.position, self.target_waypoint.graph_index)
-            else:  # if robot is lost
-                self.update_handle.update_lost_position(
-                    self.map_name, self.position)
+            else:  
+                starts = self.get_start_sets()
+                if starts is not None:
+                    print("[update] Calling generic update_position()")
+                    self.update_handle.update_position(starts)
+                else:
+                    print("[update] Calling update_lost_position()")
+                    self.update_handle.update_lost_position(
+                            self.rmf_map_name, self.position)
+                # if robot is lost
+                # self.update_handle.update_lost_position(
+                #     self.robot_map_name, self.position)
+                
+    ##############################################################################
+    # Update robot state's status
+    def update_robot_status(self):
+        if self.api.is_charging():
+            self.update_handle.override_status("charging")
+        elif not self.is_online:
+            self.node.get_logger().warn(f"Robot {self.name} is offline")
+            self.update_handle.override_status("offline")
+        elif self.in_error:
+            self.update_handle.override_status("error")
+        elif not self.api.is_localize():
+            self.node.get_logger().warn(f"Robot {self.name} is not localized")
+            self.update_handle.override_status("uninitialized")
+        else:
+            self.update_handle.override_status(None)
+
     ########################################################################
     ## Utils
     ########################################################################
-                
+
+    def position_str(self):
+        return f"{self.position[0]:.2f}, {self.position[1]:.2f}, {self.position[2]:.2f}"
+
     def get_current_lane(self):
         def projection(current_position,
                        target_position,

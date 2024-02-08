@@ -114,29 +114,67 @@ def initialize_fleet(config_yaml, nav_graph_path, node, use_sim_time, server_uri
         finishing_request)
     assert ok, ("Unable to set task planner params")
 
-    task_capabilities = []
-    if fleet_config['task_capabilities']['loop']:
+    # task_capabilities = []
+    # if fleet_config['task_capabilities']['loop']:
+    #     node.get_logger().info(
+    #         f"Fleet [{fleet_name}] is configured to perform Loop tasks")
+    #     task_capabilities.append(TaskType.TYPE_LOOP)
+    # if fleet_config['task_capabilities']['delivery']:
+    #     node.get_logger().info(
+    #         f"Fleet [{fleet_name}] is configured to perform Delivery tasks")
+    #     task_capabilities.append(TaskType.TYPE_DELIVERY)
+    # if fleet_config['task_capabilities']['clean']:
+    #     node.get_logger().info(
+    #         f"Fleet [{fleet_name}] is configured to perform Clean tasks")
+    #     task_capabilities.append(TaskType.TYPE_CLEAN)
+
+    # Accept Standard RMF Task which are defined in config.yaml
+    task_capabilities_config = fleet_config['task_capabilities']
+    always_accept = adpt.fleet_update_handle.Confirmation()
+    always_accept.accept()
+    if task_capabilities_config['loop']:
         node.get_logger().info(
             f"Fleet [{fleet_name}] is configured to perform Loop tasks")
-        task_capabilities.append(TaskType.TYPE_LOOP)
-    if fleet_config['task_capabilities']['delivery']:
+        fleet_handle.consider_patrol_requests(lambda desc: always_accept)
+    if task_capabilities_config['delivery']:
         node.get_logger().info(
             f"Fleet [{fleet_name}] is configured to perform Delivery tasks")
-        task_capabilities.append(TaskType.TYPE_DELIVERY)
-    if fleet_config['task_capabilities']['clean']:
-        node.get_logger().info(
-            f"Fleet [{fleet_name}] is configured to perform Clean tasks")
-        task_capabilities.append(TaskType.TYPE_CLEAN)
+        fleet_handle.consider_delivery_requests(lambda desc: always_accept)
+
+    # Whether to accept Custom RMF Action Task
+    def _consider(description: dict):
+        confirm = adpt.fleet_update_handle.Confirmation()
+
+        # Currently there's no way for user to submit a robot_task_request
+        # .json file via the rmf-web dashboard. Thus the short term solution
+        # is to add the fleet_name info into action description. NOTE
+        # only matching fleet_name action will get accepted
+        if (description["category"] == "manual_control" and
+            description["description"]["fleet_name"] != fleet_name):
+                return confirm
+
+        node.get_logger().warn(
+            f"Accepting action: {description} ")
+        confirm.accept()
+        return confirm
+
+    # Configure this fleet to perform action category
+    if 'action_categories' in task_capabilities_config:
+        for cat in task_capabilities_config['action_categories']:
+            node.get_logger().info(
+                f"Fleet [{fleet_name}] is configured"
+                f" to perform action of category [{cat}]")
+            fleet_handle.add_performable_action(cat, _consider)
 
     # Callable for validating requests that this fleet can accommodate
-    def _task_request_check(task_capabilities, msg: TaskProfile):
-        if msg.description.task_type in task_capabilities:
-            return True
-        else:
-            return False
+    # def _task_request_check(task_capabilities, msg: TaskProfile):
+    #     if msg.description.task_type in task_capabilities:
+    #         return True
+    #     else:
+    #         return False
 
-    fleet_handle.accept_task_requests(
-        partial(_task_request_check, task_capabilities))
+    # fleet_handle.accept_task_requests(
+    #     partial(_task_request_check, task_capabilities))
 
     # Transforms - use robot map transforms instead
     # rmf_coordinates = config_yaml['reference_coordinates']['rmf']
@@ -319,12 +357,13 @@ def initialize_fleet(config_yaml, nav_graph_path, node, use_sim_time, server_uri
                     transforms=robot_map_transforms,
                     map_name=robot_map_name,
                     start=starts[0],
-                    position=position,
+                    # position=position,
                     charger_waypoint=rmf_config['charger']['waypoint'],
                     update_frequency=rmf_config.get(
                         'robot_state_update_frequency', 1),
                     adapter=adapter,
-                    api=api)
+                    api=api,
+                    max_merge_lane_distance=rmf_config["max_merge_lane_distance"])
 
                 if robot.initialized:
                     robots[robot_name] = robot
@@ -333,8 +372,8 @@ def initialize_fleet(config_yaml, nav_graph_path, node, use_sim_time, server_uri
                                             robot_name,
                                             profile,
                                             [starts[0]],
-                                            partial(_updater_inserter,
-                                                    robot))
+                                            lambda update_handle: 
+                                                robot.init_handler(update_handle))
                     node.get_logger().info(
                         f"Successfully added new robot: {robot_name}")
 

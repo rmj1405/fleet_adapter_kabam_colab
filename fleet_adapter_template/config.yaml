@@ -4,7 +4,7 @@
 rmf_fleet:
   name: "Colab"
   fleet_manager:
-    prefix: "http://127.0.0.1:8000"
+    prefix: "http://127.0.0.1:8000" #"http://10.7.5.88:8081"
     user: "some_user"
     password: "some_password"
   limits:
@@ -33,8 +33,9 @@ rmf_fleet:
   task_capabilities: # Specify the types of RMF Tasks that robots in this fleet are capable of performing
     loop: True
     delivery: False
-    clean: False
+    # clean: False
     finishing_request: "park" # [park, charge, nothing]
+    action_categories: ["clean", "manual_control", "print"]
 
 # DeliveryBot CONFIG =================================================================
 
